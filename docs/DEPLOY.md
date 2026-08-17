@@ -1,522 +1,101 @@
-# 🚀 部署指南
+# 增强决策系统 v6 — 部署说明
 
-本文档介绍如何将 A股自选股智能分析系统部署到服务器。
+## 交付文件清单
 
-## 📋 部署方案对比
+| 文件 | 作用 | 部署位置 |
+|---|---|---|
+| `patch_indicators_v3.py` | 增强技术指标补丁（BOLL宽度分位/ATR止损/KDJ/BOLL/MACD/RSI/量价枚举） | `src/agent/patch_indicators_v3.py` |
+| `market_filter_v3.py` | 三层市场环境过滤器（方案Y） | `src/agent/market_filter_v3.py` |
+| `stock_industry_cache.py` | 股票→行业板块映射缓存 | `src/agent/stock_industry_cache.py` |
+| `enhanced_decision_v6.yaml` | LLM 策略模板（含市场环境规则+输出模板） | `my_skills/enhanced_decision_v6.yaml` |
 
-| 方案 | 优点 | 缺点 | 推荐场景 |
-|------|------|------|----------|
-| **Docker Compose** ⭐ | 一键部署、环境隔离、易迁移、易升级 | 需要安装 Docker | **推荐**：大多数场景 |
-| **直接部署** | 简单直接、无额外依赖 | 环境依赖、迁移麻烦 | 临时测试 |
-| **Systemd 服务** | 系统级管理、开机自启 | 配置繁琐 | 长期稳定运行 |
-| **Supervisor** | 进程管理、自动重启 | 需要额外安装 | 多进程管理 |
+## GitHub Secrets 配置
 
-**结论：推荐使用 Docker Compose，迁移最快最方便！**
+在 `Settings → Secrets and variables → Actions → Secrets` 中添加：
 
----
+| Secret 名 | 值 | 说明 |
+|---|---|---|
+| `STOCK_LIST` | `688433,600519,000858,hk00700` 等 | 你的持仓股票代码 |
+| `GEMINI_API_KEY` | `AIza...` | Google Gemini API Key |
+| `WECHAT_WEBHOOK_URL` | `https://qyapi.weixin.qq.com/...` | 企业微信群机器人 Webhook |
+| `WECHAT_WEBHOOK_KEYWORD` | 如 `股票日报` | 关键词校验（如飞书/企微设了关键词） |
+| `TUSHARE_TOKEN` | `你的Tushare Token` | 可选，用于修复资金流数据 |
+| `AGENT_SKILL_DIR` | `./my_skills` | 告诉项目加载自定义策略目录 |
 
-## 🐳 方案一：Docker Compose 部署（推荐）
+## 部署步骤
 
-### 1. 安装 Docker
-
+### 1. 上传策略文件
 ```bash
-# Ubuntu/Debian
-curl -fsSL https://get.docker.com | sh
-sudo usermod -aG docker $USER
+# 在 GitHub 仓库根目录创建 my_skills/ 文件夹
+mkdir -p my_skills
 
-# CentOS
-sudo yum install -y docker docker-compose
-sudo systemctl start docker
-sudo systemctl enable docker
+# 上传 enhanced_decision_v6.yaml 到 my_skills/
+# 上传 patch_indicators_v3.py 到 src/agent/
+# 上传 market_filter_v3.py 到 src/agent/
+# 上传 stock_industry_cache.py 到 src/agent/
 ```
 
-### 2. 准备配置文件
+### 2. 修改 runner.py 接入补丁
+在 `src/agent/runner.py` 的 `analyze()` 函数返回前，加入：
 
-```bash
-# 克隆代码（或上传代码到服务器）
-git clone <your-repo-url> /opt/stock-analyzer
-cd /opt/stock-analyzer
-
-# 复制并编辑配置文件
-cp .env.example .env
-vim .env  # 填入真实的 API Key 等配置
-```
-
-### 3. 一键启动
-
-```bash
-# 构建并启动（同时包含定时分析和 Web 界面服务）
-docker-compose -f ./docker/docker-compose.yml up -d
-
-# 查看日志
-docker-compose -f ./docker/docker-compose.yml logs -f
-
-# 查看运行状态
-docker-compose -f ./docker/docker-compose.yml ps
-```
-
-启动成功后，在浏览器输入 `http://服务器公网IP:8000` 即可打开 Web 管理界面。如果打不开，记得先在云服务器控制台的「安全组」里放行 8000 端口。
-
-> 不知道怎么访问？→ [云服务器 Web 界面访问指南](deploy-webui-cloud.md)
-
-### 3.1 资源建议
-
-默认 `docker/docker-compose.yml` 为每个服务设置 `limits.memory: 1G`、`reservations.memory: 512M`，这是完整分析场景的推荐起点。
-
-- 最低可尝试：`512M`，仅适合轻量 Web/API、单股、低并发场景，建议设置 `MAX_WORKERS=1`。
-- 推荐：`1G`，适合单独运行 `server` 或 `analyzer` 的常规分析。
-- 高负载：`2G+`，适合同时启动 `server + analyzer`、多股票、默认 `MAX_WORKERS=3`、大盘复盘、新闻扩展、图片报告或选股。
-
-如果只能使用 `512M`，请避免同时启动 `server` 和 `analyzer`，并关闭非必要的大盘复盘、新闻扩展和图片报告能力。
-
-### 4. 常用管理命令
-
-```bash
-# 停止服务
-docker-compose -f ./docker/docker-compose.yml down
-
-# 重启服务
-docker-compose -f ./docker/docker-compose.yml restart
-
-# 更新代码后重新部署
-git pull
-docker-compose -f ./docker/docker-compose.yml build --no-cache
-docker-compose -f ./docker/docker-compose.yml up -d
-
-# 进入容器调试
-docker-compose -f ./docker/docker-compose.yml exec -u dsa stock-analyzer bash
-
-# 手动执行一次分析
-docker-compose -f ./docker/docker-compose.yml exec -u dsa stock-analyzer python main.py --no-notify
-```
-
-### 5. 数据持久化
-
-数据自动保存在宿主机目录：
-- `./data/` - 数据库文件
-- `./logs/` - 日志文件
-- `./reports/` - 分析报告
-
-### 6. 权限说明
-
-Docker 镜像启动入口会自动创建并修复 `./data`、`./logs`、`./reports` 对应挂载目录的权限，然后降权为非 root 用户 (`dsa`, UID 1000) 运行应用。普通部署不需要手动 `chown` / `chmod`。
-
-如果你显式指定了 `--user` / Compose `user:`，或使用只读挂载、rootless Docker、NFS 等不允许容器修复属主的环境，请确保实际运行用户对这些目录具备写入权限。
-
----
-
-## 🖥️ 方案二：直接部署
-
-### 1. 安装 Python 环境
-
-```bash
-# 安装 Python 3.10+
-sudo apt update
-sudo apt install -y python3.10 python3.10-venv python3-pip
-
-# 创建虚拟环境
-python3.10 -m venv /opt/stock-analyzer/venv
-source /opt/stock-analyzer/venv/bin/activate
-```
-
-### 2. 安装依赖
-
-```bash
-cd /opt/stock-analyzer
-pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
-```
-
-### 3. 配置环境变量
-
-```bash
-cp .env.example .env
-vim .env  # 填入配置
-```
-
-### 4. 运行
-
-```bash
-# 单次运行
-python main.py
-
-# 定时任务模式（前台运行）
-python main.py --schedule
-
-# 后台运行（使用 nohup）
-nohup python main.py --schedule > /dev/null 2>&1 &
-
-# 启动 Web 管理界面（云服务器需先在 .env 中设置 WEBUI_HOST=0.0.0.0）
-python main.py --webui-only
-
-# 启动 Web 界面（启动时执行一次分析；需每日定时请加 --schedule 或设 SCHEDULE_ENABLED=true）
-python main.py --webui
-```
-
-> 不知道怎么访问？→ [云服务器 Web 界面访问指南](deploy-webui-cloud.md)
-
----
-
-## 🔧 方案三：Systemd 服务
-
-创建 systemd 服务文件实现开机自启和自动重启：
-
-### 1. 创建服务文件
-
-```bash
-sudo vim /etc/systemd/system/stock-analyzer.service
-```
-
-内容：
-```ini
-[Unit]
-Description=A股自选股智能分析系统
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/stock-analyzer
-Environment="PATH=/opt/stock-analyzer/venv/bin"
-ExecStart=/opt/stock-analyzer/venv/bin/python main.py --schedule
-Restart=always
-RestartSec=30
-
-[Install]
-WantedBy=multi-user.target
-```
-
-### 2. 启动服务
-
-```bash
-# 重载配置
-sudo systemctl daemon-reload
-
-# 启动服务
-sudo systemctl start stock-analyzer
-
-# 开机自启
-sudo systemctl enable stock-analyzer
-
-# 查看状态
-sudo systemctl status stock-analyzer
-
-# 查看日志
-journalctl -u stock-analyzer -f
-```
-
----
-
-## ⚙️ 配置说明
-
-### 必须配置项
-
-| 配置项 | 说明 | 获取方式 |
-|--------|------|----------|
-| `ANSPIRE_API_KEYS` / `AIHUBMIX_KEY` / `GEMINI_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | AI 模型至少配置一个；推荐优先 Anspire 或 AIHubMix | 对应服务商控制台 |
-| `STOCK_LIST` | 自选股列表 | 逗号分隔的股票代码 |
-| 通知渠道 | 至少配置一个，如企业微信、飞书、Telegram 或邮件 | 对应通知平台 |
-
-### 可选配置项
-
-| 配置项 | 默认值 | 说明 |
-|--------|--------|------|
-| `SCHEDULE_ENABLED` | `false` | 是否启用定时任务 |
-| `SCHEDULE_TIME` | `18:00` | 每日执行时间 |
-| `MARKET_REVIEW_ENABLED` | `true` | 是否启用大盘复盘 |
-| `ANSPIRE_API_KEYS` | - | Anspire 大模型与新闻搜索（推荐） |
-| `AIHUBMIX_KEY` | - | AIHubMix 一 Key 多模型（推荐） |
-| `SERPAPI_API_KEYS` | - | SerpAPI 实时金融新闻搜索（推荐） |
-| `TAVILY_API_KEYS` | - | Tavily 新闻搜索（可选） |
-| `MINIMAX_API_KEYS` | - | MiniMax 搜索（可选） |
-
----
-
-## 🌐 代理配置
-
-如果服务器在国内，访问 Gemini API 需要代理：
-
-### Docker 方式
-
-编辑 `docker-compose.yml`：
-```yaml
-environment:
-  - http_proxy=http://your-proxy:port
-  - https_proxy=http://your-proxy:port
-```
-
-### 直接部署方式
-
-编辑 `main.py` 顶部：
 ```python
-os.environ["http_proxy"] = "http://your-proxy:port"
-os.environ["https_proxy"] = "http://your-proxy:port"
+from patch_indicators_v3 import attach_to_analysis
+from market_filter_v3 import evaluate_stock_environment, format_env_report
+
+# 在 analysis 生成后、LLM 调用前
+analysis = attach_to_analysis(analysis, df)
+
+# 市场环境评估
+env_result = evaluate_stock_environment(stock_code)
+analysis["market_env"] = env_result
+analysis["market_env_text"] = format_env_report(env_result)
 ```
 
----
+### 3. 修改 LLM prompt 注入环境变量
+在构建发给 Gemini 的 prompt 时，把 `analysis["market_env"]` 的 JSON 也注入进去，
+YAML 模板里 `{{market_env}}` 占位符会自动替换。
 
-## 📊 监控与维护
-
-### 日志查看
-
-```bash
-# Docker 方式
-docker-compose -f ./docker/docker-compose.yml logs -f --tail=100
-
-# 直接部署
-tail -f /opt/stock-analyzer/logs/stock_analysis_*.log
-```
-
-### 健康检查
-
-```bash
-# 检查进程
-ps aux | grep main.py
-
-# 检查最近的报告
-ls -la /opt/stock-analyzer/reports/
-```
-
-### 定期维护
-
-```bash
-# 清理旧日志（保留7天）
-find /opt/stock-analyzer/logs -mtime +7 -delete
-
-# 清理旧报告（保留30天）
-find /opt/stock-analyzer/reports -mtime +30 -delete
-```
-
----
-
-## ❓ 常见问题
-
-### 1. Docker 构建失败
-
-```bash
-# 清理缓存重新构建
-docker-compose -f ./docker/docker-compose.yml build --no-cache
-```
-
-### 2. API 访问超时
-
-检查代理配置，确保服务器能访问 Gemini API。
-
-### 3. 数据库锁定
-
-```bash
-# 停止服务后删除 lock 文件
-rm /opt/stock-analyzer/data/*.lock
-```
-
-### 4. 内存不足
-
-默认 Compose 已推荐 `1G`。如果仍出现 OOM 或平台杀掉容器，请提高 `docker-compose.yml` 中的内存限制；同时跑 `server + analyzer`、多股票、大盘复盘、图片报告或选股时建议 `2G+`：
+### 4. 首次构建行业缓存
+在 Actions runner 里加一步：
 ```yaml
-deploy:
-  resources:
-    limits:
-      memory: 1G
-    reservations:
-      memory: 512M
+- name: Build industry cache
+  run: cd src/agent && python stock_industry_cache.py
 ```
 
-低配环境只能使用 `512M` 时，建议设置 `MAX_WORKERS=1`，只启动 `server` 或 `analyzer` 其中一个服务，并减少非必要的大盘复盘、新闻扩展和图片报告任务。
+## 降级策略（网络/接口失败时不阻断）
 
-### 5. WebUI 打开后 UI 元素异常变大 / 布局错乱
+| 失败层级 | 降级行为 |
+|---|---|
+| 个股日线拉不到 | 跳过该股票，记录错误，继续下一只 |
+| 风格指数接口失败 | 跳过第2层，用第1层+第3层判定 |
+| 行业板块接口失败 | 行业因子视为通过（保守放行） |
+| 三层全失败 | environment = sideways，禁止趋势做多 |
+| LLM 调用失败 | 用 tech_summary 作为降级文本直接推送 |
 
-**症状**：能访问 8000 端口，但页面上的文字、按钮、卡片异常放大，没有正常布局。
+## 验证清单
 
-**根因**：`static/index.html` 存在，但 CSS/JS 资源文件缺失（`static/assets/` 为空或不存在），浏览器无法加载样式与脚本，导致裸 HTML 渲染。
+跑通后，每只股票的报告应包含：
+- ✅ 第0节：三层市场环境过滤（市场层/风格层/行业层/综合判定）
+- ✅ 第1节：标的属性 + 推荐周期 + 决策理由
+- ✅ 第2节：量价/BOLL/KDJ/MACD&RSI/多空共振/关键点位
+- ✅ BOLL 宽度历史分位 + 四档标签
+- ✅ 三档减仓（stage1/stage2/止损）
+- ✅ 已持仓 + 未持仓两套预案
+- ✅ 附：技术指标 JSON + 市场环境 JSON
 
-**解决方法**：
+## 参数调优建议
 
-- **Docker 部署**：执行以下命令重新构建镜像（确保前端已正确打包进镜像）：
-  ```bash
-  docker-compose -f ./docker/docker-compose.yml down
-  docker-compose -f ./docker/docker-compose.yml build --no-cache
-  docker-compose -f ./docker/docker-compose.yml up -d
-  ```
-  构建完成后刷新浏览器缓存（`Ctrl+Shift+R`）再访问。
+| 参数 | 当前值 | 调整建议 |
+|---|---|---|
+| ATR 止损倍数 | 1.5× | 保守者改 1.2×；趋势跟踪者可改 2.0× |
+| 三档减仓比例 | 10%/30%/30% | 重仓股可改 20%/30%/30% |
+| 涨跌比阈值 | 1.0 | 保守改 1.2；宽松改 0.8 |
+| BOLL 宽度分位阈值 | 0.20/0.80 | 震荡市可收紧到 0.30/0.70 |
+| 零轴纠缠阈值 | 0.5×ATR | 敏感者可改 0.3×ATR |
 
-- **直接部署（pip + python）**：先构建前端，再启动服务：
-  ```bash
-  # 安装 Node.js 18+（推荐 20+，如尚未安装）
-  # 构建前端
-  cd apps/dsa-web
-  npm ci
-  npm run build
-  cd ../..
-  # 启动服务
-  python main.py --webui-only
-  ```
+## 注意事项
 
-**验证**：用浏览器开发者工具（F12 → Network）检查是否有 `/assets/index-*.js` 和 `/assets/index-*.css` 的 404 错误；如有，说明资源缺失，按上述步骤重新构建即可。
-
----
-
-## 🔄 快速迁移
-
-从一台服务器迁移到另一台：
-
-```bash
-# 源服务器：打包
-cd /opt/stock-analyzer
-tar -czvf stock-analyzer-backup.tar.gz .env data/ logs/ reports/
-
-# 目标服务器：部署
-mkdir -p /opt/stock-analyzer
-cd /opt/stock-analyzer
-git clone <your-repo-url> .
-tar -xzvf stock-analyzer-backup.tar.gz
-docker-compose -f ./docker/docker-compose.yml up -d
-```
-
----
-
-## ☁️ 方案四：GitHub Actions 部署（免服务器）
-
-**最简单的方案！** 无需服务器，利用 GitHub 免费计算资源。
-
-### 优势
-- ✅ **完全免费**（每月 2000 分钟）
-- ✅ **无需服务器**
-- ✅ **自动定时执行**
-- ✅ **零维护成本**
-
-### 限制
-- ⚠️ 无状态（每次运行是新环境）
-- ⚠️ 定时可能有几分钟延迟
-- ⚠️ 无法提供 HTTP API
-
-### 部署步骤
-
-#### 1. 创建 GitHub 仓库
-
-```bash
-# 初始化 git（如果还没有）
-cd /path/to/daily_stock_analysis
-git init
-git add .
-git commit -m "Initial commit"
-
-# 创建 GitHub 仓库并推送
-# 在 GitHub 网页上创建新仓库后：
-git remote add origin https://github.com/你的用户名/daily_stock_analysis.git
-git branch -M main
-git push -u origin main
-```
-
-#### 2. 配置 Secrets（重要！）
-
-打开仓库页面 → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**
-
-添加以下 Secrets：
-
-| Secret 名称 | 说明 | 必填 |
-|------------|------|------|
-| `ANSPIRE_API_KEYS` | Anspire Open API Key（一 Key 启用大模型与搜索） | 推荐 |
-| `AIHUBMIX_KEY` | AIHubMix API Key（一 Key 多模型） | 推荐 |
-| `ANTHROPIC_API_KEY` | Anthropic API Key | 可选 |
-| `GEMINI_API_KEY` | Gemini AI API Key | 可选 |
-| `OPENAI_API_KEY` | OpenAI 兼容 API Key | 可选 |
-| `WECHAT_WEBHOOK_URL` | 企业微信机器人 Webhook | 可选* |
-| `FEISHU_WEBHOOK_URL` | 飞书机器人 Webhook | 可选* |
-| `TELEGRAM_BOT_TOKEN` | Telegram Bot Token | 可选* |
-| `TELEGRAM_CHAT_ID` | Telegram Chat ID | 可选* |
-| `TELEGRAM_MESSAGE_THREAD_ID` | Telegram Topic ID | 可选* |
-| `EMAIL_SENDER` | 发件人邮箱 | 可选* |
-| `EMAIL_PASSWORD` | 邮箱授权码 | 可选* |
-| `SERVERCHAN3_SENDKEY` | Server酱³ Sendkey | 可选* |
-| `CUSTOM_WEBHOOK_URLS` | 自定义 Webhook（多个逗号分隔） | 可选* |
-| `STOCK_LIST` | 自选股列表，如 `600519,300750` | ✅ |
-| `SERPAPI_API_KEYS` | SerpAPI Key | 推荐 |
-| `TAVILY_API_KEYS` | Tavily 搜索 API Key | 可选 |
-| `BOCHA_API_KEYS` | 博查搜索 API Key | 可选 |
-| `BRAVE_API_KEYS` | Brave Search API Key | 可选 |
-| `MINIMAX_API_KEYS` | MiniMax Coding Plan Web Search | 可选 |
-| `SEARXNG_BASE_URLS` | SearXNG 自建实例（无配额兜底，需在 settings.yml 启用 format: json）；留空时默认自动发现公共实例 | 可选 |
-| `SEARXNG_PUBLIC_INSTANCES_ENABLED` | 是否在 `SEARXNG_BASE_URLS` 为空时自动从 `searx.space` 获取公共实例（默认 `true`） | 可选 |
-| `TUSHARE_TOKEN` | Tushare Token | 可选 |
-| `GEMINI_MODEL` | 模型名称（默认 gemini-2.0-flash） | 可选 |
-
-> *注：通知渠道至少配置一个，支持多渠道同时推送
-
-#### 3. 验证 Workflow 文件
-
-确保 `.github/workflows/00-daily-analysis.yml` 文件存在且已提交：
-
-```bash
-git add .github/workflows/00-daily-analysis.yml
-git commit -m "Add GitHub Actions workflow"
-git push
-```
-
-#### 4. 手动测试运行
-
-1. 打开仓库页面 → **Actions** 标签
-2. 选择 **"每日股票分析"** workflow
-3. 点击 **"Run workflow"** 按钮
-4. 选择运行模式：
-   - `full` - 完整分析（股票+大盘）
-   - `market-only` - 仅大盘复盘
-   - `stocks-only` - 仅股票分析
-5. 点击绿色 **"Run workflow"** 按钮
-
-#### 5. 查看执行日志
-
-- Actions 页面可以看到运行历史
-- 点击具体的运行记录查看详细日志
-- 分析报告会作为 Artifact 保存 30 天
-
-### 定时说明
-
-默认配置：**周一到周五，北京时间 18:00** 自动执行
-
-修改时间：编辑 `.github/workflows/00-daily-analysis.yml` 中的 cron 表达式：
-
-```yaml
-schedule:
-  - cron: '0 10 * * 1-5'  # UTC 时间，+8 = 北京时间
-```
-
-常用 cron 示例：
-| 表达式 | 说明 |
-|--------|------|
-| `'0 10 * * 1-5'` | 周一到周五 18:00（北京时间） |
-| `'30 7 * * 1-5'` | 周一到周五 15:30（北京时间） |
-| `'0 10 * * *'` | 每天 18:00（北京时间） |
-| `'0 2 * * 1-5'` | 周一到周五 10:00（北京时间） |
-
-### 修改自选股
-
-方法一：修改仓库 Secret `STOCK_LIST`
-
-方法二：直接修改代码后推送：
-```bash
-# 修改 .env.example 或在代码中设置默认值
-git commit -am "Update stock list"
-git push
-```
-
-### 常见问题
-
-**Q: 为什么定时任务没有执行？**
-A: GitHub Actions 定时任务可能有 5-15 分钟延迟，且仅在仓库有活动时才触发。长时间无 commit 可能导致 workflow 被禁用。
-
-**Q: 如何查看历史报告？**
-A: Actions → 选择运行记录 → Artifacts → 下载 `analysis-reports-xxx`
-
-**Q: 免费额度够用吗？**
-A: 每次运行约 2-5 分钟，一个月 22 个工作日 = 44-110 分钟，远低于 2000 分钟限制。
-
----
-
-## 🌐 云服务器上部署了，但不知道怎么用浏览器访问？
-
-详见 → [云服务器 Web 界面访问指南](deploy-webui-cloud.md)
-
-涵盖：直接部署和 Docker 两种方式的启动与访问、安全组/防火墙配置、常见问题排查、Nginx 反向代理（可选）。
-
----
-
-**祝部署顺利！🎉**
+1. **AkShare 接口有频率限制**，10 只以内稳，超过 20 只有限流风险
+2. **行业缓存首次构建需 5-10 分钟**（遍历 50+ 板块），之后增量更新很快
+3. **企业微信 Webhook 地址等同于发消息权限**，不要泄露
+4. **本系统为辅助决策工具**，所有止损/仓位建议需人工复核
